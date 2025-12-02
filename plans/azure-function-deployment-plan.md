@@ -1665,7 +1665,7 @@ actions:
 
 | Version | Date       | Author        | Changes                 |
 | ------- | ---------- | ------------- | ----------------------- |
-| 1.0     | 2024-01-15 | Planning Team | Initial deployment plan |
+| 1.0     | 2025-12-02 | Planning Team | Initial deployment plan |
 
 ---
 
@@ -1724,6 +1724,6 @@ The deployment will be considered successful when:
 ---
 
 **Document Version:** 1.0  
-**Last Updated:** January 15, 2024  
+**Last Updated:** December 2, 2025  
 **Status:** Draft - Awaiting Review  
 **Classification:** Internal Use Only
