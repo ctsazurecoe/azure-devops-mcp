@@ -34,6 +34,8 @@ describe("repos tools", () => {
     getRefs: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
     getPullRequest: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
     getPullRequestLabels: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+    createPullRequestLabel: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
+    deletePullRequestLabels: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
     createComment: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
     createThread: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
     updateThread: jest.MockedFunction<(...args: unknown[]) => Promise<unknown>>;
@@ -61,6 +63,8 @@ describe("repos tools", () => {
       getRefs: jest.fn(),
       getPullRequest: jest.fn(),
       getPullRequestLabels: jest.fn(),
+      createPullRequestLabel: jest.fn(),
+      deletePullRequestLabels: jest.fn(),
       createComment: jest.fn(),
       createThread: jest.fn(),
       updateThread: jest.fn(),
@@ -407,7 +411,7 @@ describe("repos tools", () => {
 
       expect(mockGitApi.updatePullRequest).not.toHaveBeenCalled();
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("At least one field (title, description, isDraft, targetRefName, status, or autoComplete options) must be provided for update.");
+      expect(result.content[0].text).toContain("At least one field (title, description, isDraft, targetRefName, status, autoComplete options, or labels) must be provided for update.");
     });
 
     it("should update pull request with autocomplete enabled", async () => {
@@ -615,6 +619,239 @@ describe("repos tools", () => {
       // Should succeed since validation is handled at schema level
       const result = await handler(params);
       expect(result.content).toBeDefined();
+    });
+
+    it("should update pull request labels by replacing existing labels", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request);
+      if (!call) throw new Error("repo_update_pull_request tool not registered");
+      const [, , , handler] = call;
+
+      // Mock existing labels
+      const existingLabels = [
+        { id: "label1", name: "bug", active: true },
+        { id: "label2", name: "urgent", active: true },
+      ];
+      mockGitApi.getPullRequestLabels.mockResolvedValue(existingLabels);
+
+      // Mock label deletion
+      mockGitApi.deletePullRequestLabels.mockResolvedValue(undefined);
+
+      // Mock label creation
+      mockGitApi.createPullRequestLabel.mockResolvedValue({ name: "enhancement", active: true });
+
+      // Mock the final pull request state
+      const mockUpdatedPR = {
+        pullRequestId: 123,
+        codeReviewId: 123,
+        repository: { name: "test-repo" },
+        status: 1,
+        createdBy: {
+          displayName: "Test User",
+          uniqueName: "testuser@example.com",
+        },
+        creationDate: "2023-01-01T00:00:00Z",
+        title: "Test PR",
+        isDraft: false,
+        sourceRefName: "refs/heads/feature",
+        targetRefName: "refs/heads/main",
+      };
+      mockGitApi.getPullRequest.mockResolvedValue(mockUpdatedPR);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 123,
+        labels: ["enhancement", "feature"],
+      };
+
+      const result = await handler(params);
+
+      // Verify that existing labels were fetched
+      expect(mockGitApi.getPullRequestLabels).toHaveBeenCalledWith("repo123", 123);
+
+      // Verify that existing labels were deleted
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledWith("repo123", 123, "label1");
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledWith("repo123", 123, "label2");
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledTimes(2);
+
+      // Verify that new labels were created
+      expect(mockGitApi.createPullRequestLabel).toHaveBeenCalledWith({ name: "enhancement" }, "repo123", 123);
+      expect(mockGitApi.createPullRequestLabel).toHaveBeenCalledWith({ name: "feature" }, "repo123", 123);
+      expect(mockGitApi.createPullRequestLabel).toHaveBeenCalledTimes(2);
+
+      // Verify that getPullRequest was called to get the updated PR (since only labels were updated)
+      expect(mockGitApi.getPullRequest).toHaveBeenCalledWith("repo123", 123);
+
+      expect(result.isError).toBeFalsy();
+    });
+
+    it("should update pull request with labels and other fields", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request);
+      if (!call) throw new Error("repo_update_pull_request tool not registered");
+      const [, , , handler] = call;
+
+      // Mock existing labels
+      const existingLabels = [{ id: "label1", name: "old-label", active: true }];
+      mockGitApi.getPullRequestLabels.mockResolvedValue(existingLabels);
+      mockGitApi.deletePullRequestLabels.mockResolvedValue(undefined);
+      mockGitApi.createPullRequestLabel.mockResolvedValue({ name: "new-label", active: true });
+
+      const mockUpdatedPR = {
+        pullRequestId: 123,
+        codeReviewId: 123,
+        repository: { name: "test-repo" },
+        status: 1,
+        createdBy: {
+          displayName: "Test User",
+          uniqueName: "testuser@example.com",
+        },
+        creationDate: "2023-01-01T00:00:00Z",
+        title: "Updated Title",
+        description: "Updated Description",
+        isDraft: true,
+        sourceRefName: "refs/heads/feature",
+        targetRefName: "refs/heads/main",
+      };
+      mockGitApi.updatePullRequest.mockResolvedValue(mockUpdatedPR);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 123,
+        title: "Updated Title",
+        description: "Updated Description",
+        labels: ["new-label"],
+      };
+
+      const result = await handler(params);
+
+      // Verify labels were updated
+      expect(mockGitApi.getPullRequestLabels).toHaveBeenCalledWith("repo123", 123);
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledWith("repo123", 123, "label1");
+      expect(mockGitApi.createPullRequestLabel).toHaveBeenCalledWith({ name: "new-label" }, "repo123", 123);
+
+      // Verify PR was updated with title and description
+      expect(mockGitApi.updatePullRequest).toHaveBeenCalledWith(
+        {
+          title: "Updated Title",
+          description: "Updated Description",
+        },
+        "repo123",
+        123
+      );
+
+      // Since there are other fields besides labels, updatePullRequest should have been called
+      expect(mockGitApi.getPullRequest).not.toHaveBeenCalled();
+
+      expect(result.isError).toBeFalsy();
+    });
+
+    it("should update pull request labels to empty array (remove all labels)", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request);
+      if (!call) throw new Error("repo_update_pull_request tool not registered");
+      const [, , , handler] = call;
+
+      // Mock existing labels
+      const existingLabels = [
+        { id: "label1", name: "bug", active: true },
+        { id: "label2", name: "urgent", active: true },
+      ];
+      mockGitApi.getPullRequestLabels.mockResolvedValue(existingLabels);
+      mockGitApi.deletePullRequestLabels.mockResolvedValue(undefined);
+
+      const mockUpdatedPR = {
+        pullRequestId: 123,
+        codeReviewId: 123,
+        repository: { name: "test-repo" },
+        status: 1,
+        createdBy: {
+          displayName: "Test User",
+          uniqueName: "testuser@example.com",
+        },
+        creationDate: "2023-01-01T00:00:00Z",
+        title: "Test PR",
+        isDraft: false,
+        sourceRefName: "refs/heads/feature",
+        targetRefName: "refs/heads/main",
+      };
+      mockGitApi.getPullRequest.mockResolvedValue(mockUpdatedPR);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 123,
+        labels: [],
+      };
+
+      const result = await handler(params);
+
+      // Verify that existing labels were fetched
+      expect(mockGitApi.getPullRequestLabels).toHaveBeenCalledWith("repo123", 123);
+
+      // Verify that all existing labels were deleted
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledWith("repo123", 123, "label1");
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledWith("repo123", 123, "label2");
+      expect(mockGitApi.deletePullRequestLabels).toHaveBeenCalledTimes(2);
+
+      // Verify that no new labels were created
+      expect(mockGitApi.createPullRequestLabel).not.toHaveBeenCalled();
+
+      // Verify that getPullRequest was called
+      expect(mockGitApi.getPullRequest).toHaveBeenCalledWith("repo123", 123);
+
+      expect(result.isError).toBeFalsy();
+    });
+
+    it("should handle labels when existing PR has no labels", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request);
+      if (!call) throw new Error("repo_update_pull_request tool not registered");
+      const [, , , handler] = call;
+
+      // Mock no existing labels
+      mockGitApi.getPullRequestLabels.mockResolvedValue([]);
+      mockGitApi.createPullRequestLabel.mockResolvedValue({ name: "first-label", active: true });
+
+      const mockUpdatedPR = {
+        pullRequestId: 123,
+        codeReviewId: 123,
+        repository: { name: "test-repo" },
+        status: 1,
+        createdBy: {
+          displayName: "Test User",
+          uniqueName: "testuser@example.com",
+        },
+        creationDate: "2023-01-01T00:00:00Z",
+        title: "Test PR",
+        isDraft: false,
+        sourceRefName: "refs/heads/feature",
+        targetRefName: "refs/heads/main",
+      };
+      mockGitApi.getPullRequest.mockResolvedValue(mockUpdatedPR);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 123,
+        labels: ["first-label"],
+      };
+
+      const result = await handler(params);
+
+      // Verify that existing labels were fetched
+      expect(mockGitApi.getPullRequestLabels).toHaveBeenCalledWith("repo123", 123);
+
+      // Verify that no labels were deleted
+      expect(mockGitApi.deletePullRequestLabels).not.toHaveBeenCalled();
+
+      // Verify that new label was created
+      expect(mockGitApi.createPullRequestLabel).toHaveBeenCalledWith({ name: "first-label" }, "repo123", 123);
+      expect(mockGitApi.createPullRequestLabel).toHaveBeenCalledTimes(1);
+
+      expect(result.isError).toBeFalsy();
     });
   });
 
@@ -3687,56 +3924,285 @@ describe("repos tools", () => {
     });
   });
 
-  describe("repo_resolve_comment", () => {
-    it("should resolve comment thread successfully", async () => {
+  describe("repo_update_pull_request_thread", () => {
+    it("should update thread status to Active", async () => {
       configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
 
-      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.resolve_comment);
-      if (!call) throw new Error("repo_resolve_comment tool not registered");
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
       const [, , , handler] = call;
 
-      const mockThread = { id: 123, status: CommentThreadStatus.Fixed };
+      const mockThread = {
+        id: 123,
+        status: CommentThreadStatus.Active,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-02T00:00:00Z",
+        comments: [{ id: 1, content: "Test comment", author: { displayName: "Test User", uniqueName: "test@example.com" } }],
+        threadContext: { filePath: "/src/test.ts" },
+      };
       mockGitApi.updateThread.mockResolvedValue(mockThread);
 
       const params = {
         repositoryId: "repo123",
         pullRequestId: 456,
         threadId: 789,
+        project: "TestProject",
+        status: "Active" as const,
       };
 
       const result = await handler(params);
 
-      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.Fixed }, "repo123", 456, 789);
-      expect(result.content[0].text).toBe("Thread 789 was successfully resolved.");
+      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.Active }, "repo123", 456, 789, "TestProject");
+
+      const expectedTrimmedThread = {
+        id: 123,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-02T00:00:00Z",
+        status: CommentThreadStatus.Active,
+        comments: [
+          {
+            id: 1,
+            author: {
+              displayName: "Test User",
+              uniqueName: "test@example.com",
+            },
+            content: "Test comment",
+            publishedDate: undefined,
+            lastUpdatedDate: undefined,
+            lastContentUpdatedDate: undefined,
+          },
+        ],
+        threadContext: { filePath: "/src/test.ts" },
+      };
+      expect(result.content[0].text).toBe(JSON.stringify(expectedTrimmedThread, null, 2));
     });
 
-    it("should return full response when requested", async () => {
+    it("should update thread status to Fixed", async () => {
       configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
 
-      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.resolve_comment);
-      if (!call) throw new Error("repo_resolve_comment tool not registered");
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
       const [, , , handler] = call;
 
-      const mockThread = { id: 123, status: CommentThreadStatus.Fixed };
+      const mockThread = {
+        id: 456,
+        status: CommentThreadStatus.Fixed,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-03T00:00:00Z",
+        comments: [],
+        threadContext: null,
+      };
       mockGitApi.updateThread.mockResolvedValue(mockThread);
 
       const params = {
         repositoryId: "repo123",
         pullRequestId: 456,
         threadId: 789,
-        fullResponse: true,
+        project: "TestProject",
+        status: "Fixed" as const,
       };
 
       const result = await handler(params);
 
-      expect(result.content[0].text).toBe(JSON.stringify(mockThread, null, 2));
+      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.Fixed }, "repo123", 456, 789, "TestProject");
+
+      const expectedTrimmedThread = {
+        id: 456,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-03T00:00:00Z",
+        status: CommentThreadStatus.Fixed,
+        comments: [],
+        threadContext: null,
+      };
+      expect(result.content[0].text).toBe(JSON.stringify(expectedTrimmedThread, null, 2));
     });
 
-    it("should return error when thread resolution fails", async () => {
+    it("should update thread status to WontFix", async () => {
       configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
 
-      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.resolve_comment);
-      if (!call) throw new Error("repo_resolve_comment tool not registered");
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 789,
+        status: CommentThreadStatus.WontFix,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-04T00:00:00Z",
+        comments: [],
+        threadContext: null,
+      };
+      mockGitApi.updateThread.mockResolvedValue(mockThread);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        threadId: 789,
+        project: "TestProject",
+        status: "WontFix" as const,
+      };
+
+      const result = await handler(params);
+
+      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.WontFix }, "repo123", 456, 789, "TestProject");
+
+      const expectedTrimmedThread = {
+        id: 789,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-04T00:00:00Z",
+        status: CommentThreadStatus.WontFix,
+        comments: [],
+        threadContext: null,
+      };
+      expect(result.content[0].text).toBe(JSON.stringify(expectedTrimmedThread, null, 2));
+    });
+
+    it("should update thread status to Closed", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 100,
+        status: CommentThreadStatus.Closed,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-05T00:00:00Z",
+        comments: [],
+        threadContext: null,
+      };
+      mockGitApi.updateThread.mockResolvedValue(mockThread);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        threadId: 100,
+        project: "TestProject",
+        status: "Closed" as const,
+      };
+
+      const result = await handler(params);
+
+      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.Closed }, "repo123", 456, 100, "TestProject");
+
+      const expectedTrimmedThread = {
+        id: 100,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-05T00:00:00Z",
+        status: CommentThreadStatus.Closed,
+        comments: [],
+        threadContext: null,
+      };
+      expect(result.content[0].text).toBe(JSON.stringify(expectedTrimmedThread, null, 2));
+    });
+
+    it("should update thread status to ByDesign", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 200,
+        status: CommentThreadStatus.ByDesign,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-06T00:00:00Z",
+        comments: [],
+        threadContext: null,
+      };
+      mockGitApi.updateThread.mockResolvedValue(mockThread);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        threadId: 200,
+        project: "TestProject",
+        status: "ByDesign" as const,
+      };
+
+      const result = await handler(params);
+
+      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.ByDesign }, "repo123", 456, 200, "TestProject");
+
+      const expectedTrimmedThread = {
+        id: 200,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-06T00:00:00Z",
+        status: CommentThreadStatus.ByDesign,
+        comments: [],
+        threadContext: null,
+      };
+      expect(result.content[0].text).toBe(JSON.stringify(expectedTrimmedThread, null, 2));
+    });
+
+    it("should update thread status to Pending", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 300,
+        status: CommentThreadStatus.Pending,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-07T00:00:00Z",
+        comments: [],
+        threadContext: null,
+      };
+      mockGitApi.updateThread.mockResolvedValue(mockThread);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        threadId: 300,
+        project: "TestProject",
+        status: "Pending" as const,
+      };
+
+      const result = await handler(params);
+
+      expect(mockGitApi.updateThread).toHaveBeenCalledWith({ status: CommentThreadStatus.Pending }, "repo123", 456, 300, "TestProject");
+
+      const expectedTrimmedThread = {
+        id: 300,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-07T00:00:00Z",
+        status: CommentThreadStatus.Pending,
+        comments: [],
+        threadContext: null,
+      };
+      expect(result.content[0].text).toBe(JSON.stringify(expectedTrimmedThread, null, 2));
+    });
+
+    it("should return error when no fields provided", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        threadId: 789,
+        project: "TestProject",
+      };
+
+      const result = await handler(params);
+
+      expect(mockGitApi.updateThread).not.toHaveBeenCalled();
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe("Error: At least one field (status) must be provided for update.");
+    });
+
+    it("should return error when thread update fails", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
       const [, , , handler] = call;
 
       mockGitApi.updateThread.mockResolvedValue(null);
@@ -3745,12 +4211,52 @@ describe("repos tools", () => {
         repositoryId: "repo123",
         pullRequestId: 456,
         threadId: 789,
+        project: "TestProject",
+        status: "Active" as const,
       };
 
       const result = await handler(params);
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Error: Failed to resolve thread 789");
+      expect(result.content[0].text).toBe("Error: Failed to update thread 789. The thread was not updated successfully.");
+    });
+
+    it("should filter deleted comments from response", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+      if (!call) throw new Error("repo_update_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 123,
+        status: CommentThreadStatus.Active,
+        publishedDate: "2023-01-01T00:00:00Z",
+        lastUpdatedDate: "2023-01-02T00:00:00Z",
+        comments: [
+          { id: 1, content: "Active comment", author: { displayName: "User 1", uniqueName: "user1@example.com" }, isDeleted: false },
+          { id: 2, content: "Deleted comment", author: { displayName: "User 2", uniqueName: "user2@example.com" }, isDeleted: true },
+          { id: 3, content: "Another active comment", author: { displayName: "User 3", uniqueName: "user3@example.com" }, isDeleted: false },
+        ],
+        threadContext: null,
+      };
+      mockGitApi.updateThread.mockResolvedValue(mockThread);
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        threadId: 789,
+        project: "TestProject",
+        status: "Active" as const,
+      };
+
+      const result = await handler(params);
+
+      const parsedResult = JSON.parse(result.content[0].text);
+      expect(parsedResult.comments).toHaveLength(2);
+      expect(parsedResult.comments[0].id).toBe(1);
+      expect(parsedResult.comments[1].id).toBe(3);
+      expect(parsedResult.comments.find((c: any) => c.id === 2)).toBeUndefined();
     });
   });
 
@@ -4085,28 +4591,6 @@ describe("repos tools", () => {
       });
     });
 
-    it("should handle thread resolution error", async () => {
-      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
-
-      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.resolve_comment);
-      if (!call) throw new Error("repo_resolve_comment tool not registered");
-      const [, , , handler] = call;
-
-      mockGitApi.updateThread.mockRejectedValue(new Error("Thread resolution failed"));
-
-      const params = {
-        repositoryId: "repo123",
-        pullRequestId: 456,
-        threadId: 789,
-      };
-
-      const result = await handler(params);
-      expect(result).toEqual({
-        content: [{ type: "text", text: "Error resolving comment: Thread resolution failed" }],
-        isError: true,
-      });
-    });
-
     it("should handle comment reply error", async () => {
       configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
 
@@ -4150,6 +4634,194 @@ describe("repos tools", () => {
       const result = await handler(params);
       expect(result).toEqual({
         content: [{ type: "text", text: "rightFileStartLine must be greater than or equal to 1." }],
+        isError: true,
+      });
+    });
+
+    it("should reject invalid rightFileStartOffset in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileStartOffset: 0, // Invalid offset (should be >= 1)
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileStartOffset must be greater than or equal to 1." }],
+        isError: true,
+      });
+    });
+
+    it("should reject rightFileEndLine without rightFileStartLine in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileEndLine: 15, // End line without start line
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndLine must only be specified if rightFileStartLine is also specified." }],
+        isError: true,
+      });
+    });
+
+    it("should reject invalid rightFileEndLine in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileEndLine: 0, // Invalid end line (should be >= 1)
+        rightFileEndOffset: 5,
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndLine must be greater than or equal to 1." }],
+        isError: true,
+      });
+    });
+
+    it("should reject rightFileEndLine without rightFileEndOffset in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileEndLine: 15, // End line without end offset
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndOffset must be specified if rightFileEndLine is specified." }],
+        isError: true,
+      });
+    });
+
+    it("should reject invalid rightFileEndOffset in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileEndLine: 15,
+        rightFileEndOffset: 0, // Invalid offset (should be >= 1)
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndOffset must be greater than or equal to 1." }],
+        isError: true,
+      });
+    });
+
+    it("should reject rightFileEndOffset without rightFileEndLine in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileEndOffset: 5, // End offset without end line
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndLine must be specified if rightFileEndOffset is specified." }],
+        isError: true,
+      });
+    });
+
+    it("should require both rightFileEndLine and rightFileEndOffset when rightFileStartLine and rightFileStartOffset are specified", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileStartOffset: 5,
+        // Missing rightFileEndLine and rightFileEndOffset
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndLine and rightFileEndOffset must both be specified when rightFileStartLine and rightFileStartOffset are both specified." }],
+        isError: true,
+      });
+    });
+
+    it("should reject rightFileEndOffset less than rightFileStartOffset on same line in create_pull_request_thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+
+      const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.create_pull_request_thread);
+      if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
+      const [, , , handler] = call;
+
+      const params = {
+        repositoryId: "repo123",
+        pullRequestId: 456,
+        content: "Test comment",
+        filePath: "/test/file.js",
+        rightFileStartLine: 10,
+        rightFileStartOffset: 20,
+        rightFileEndLine: 10, // Same line
+        rightFileEndOffset: 5, // End offset less than start offset
+      };
+
+      const result = await handler(params);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "rightFileEndOffset must be greater than or equal to rightFileStartOffset when both are on the same line." }],
         isError: true,
       });
     });
@@ -4505,6 +5177,8 @@ describe("repos tools", () => {
         status: "Active", // Provide explicit status
         rightFileStartLine: 5,
         rightFileStartOffset: 10, // Valid offset
+        rightFileEndLine: 5, // Must specify both end line and offset when start offset is specified
+        rightFileEndOffset: 20,
       };
 
       const result = await handler(params);
@@ -4515,6 +5189,7 @@ describe("repos tools", () => {
           threadContext: {
             filePath: "/test/file.js",
             rightFileStart: { line: 5, offset: 10 },
+            rightFileEnd: { line: 5, offset: 20 },
           },
           status: CommentThreadStatus.Active,
         },
@@ -4986,9 +5661,6 @@ describe("repos tools", () => {
       if (!call) throw new Error("repo_create_pull_request_thread tool not registered");
       const [, , , handler] = call;
 
-      const mockThread = { id: 1, status: CommentThreadStatus.Active };
-      mockGitApi.createThread.mockResolvedValue(mockThread);
-
       const params = {
         repositoryId: "repo123",
         pullRequestId: 456,
@@ -4996,13 +5668,14 @@ describe("repos tools", () => {
         filePath: "/test/file.js",
         rightFileStartLine: 5,
         rightFileStartOffset: 10,
-        rightFileEndOffset: 20, // End offset without end line - should still work
+        rightFileEndOffset: 20, // End offset without end line - should trigger error
       };
 
       const result = await handler(params);
 
-      expect(mockGitApi.createThread).toHaveBeenCalled();
-      expect(result.content[0].text).toBe(JSON.stringify(mockThread, null, 2));
+      // Should return an error because rightFileEndLine must be specified when rightFileEndOffset is specified
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe("rightFileEndLine must be specified if rightFileEndOffset is specified.");
     });
 
     it("should handle error in list_pull_requests_by_commits", async () => {
@@ -5769,24 +6442,72 @@ describe("repos tools", () => {
       });
     });
 
-    describe("repo_resolve_comment error handling", () => {
-      it("should handle comment resolution errors", async () => {
+    describe("repo_update_pull_request_thread error handling", () => {
+      it("should handle thread update errors", async () => {
         configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
-        const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.resolve_comment);
+        const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
         const [, , , handler] = call;
 
-        mockGitApi.updateThread.mockRejectedValue(new Error("Thread cannot be resolved"));
+        mockGitApi.updateThread.mockRejectedValue(new Error("Thread not found"));
 
         const params = {
           repositoryId: "repo123",
           pullRequestId: 456,
           threadId: 789,
+          project: "TestProject",
+          status: "Active" as const,
         };
 
         const result = await handler(params);
 
         expect(result).toEqual({
-          content: [{ type: "text", text: "Error resolving comment: Thread cannot be resolved" }],
+          content: [{ type: "text", text: "Error updating pull request thread: Thread not found" }],
+          isError: true,
+        });
+      });
+
+      it("should handle API connection errors", async () => {
+        configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+        const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+        const [, , , handler] = call;
+
+        mockGitApi.updateThread.mockRejectedValue(new Error("Network connection failed"));
+
+        const params = {
+          repositoryId: "repo123",
+          pullRequestId: 456,
+          threadId: 789,
+          project: "TestProject",
+          status: "Fixed" as const,
+        };
+
+        const result = await handler(params);
+
+        expect(result).toEqual({
+          content: [{ type: "text", text: "Error updating pull request thread: Network connection failed" }],
+          isError: true,
+        });
+      });
+
+      it("should handle non-Error thrown objects", async () => {
+        configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+        const call = (server.tool as jest.Mock).mock.calls.find(([toolName]) => toolName === REPO_TOOLS.update_pull_request_thread);
+        const [, , , handler] = call;
+
+        mockGitApi.updateThread.mockRejectedValue("String error");
+
+        const params = {
+          repositoryId: "repo123",
+          pullRequestId: 456,
+          threadId: 789,
+          project: "TestProject",
+          status: "Closed" as const,
+        };
+
+        const result = await handler(params);
+
+        expect(result).toEqual({
+          content: [{ type: "text", text: "Error updating pull request thread: Unknown error occurred" }],
           isError: true,
         });
       });
